@@ -18,6 +18,16 @@ namespace XafGitHubCopilot.Module.Services
         private readonly SemaphoreSlim _startLock = new(1, 1);
         private bool _started;
 
+        /// <summary>
+        /// Gets or sets the model used for new sessions.
+        /// Changing this at runtime affects subsequent calls to AskAsync / AskStreamingAsync.
+        /// </summary>
+        public string CurrentModel
+        {
+            get => _options.Model;
+            set => _options.Model = value;
+        }
+
         public CopilotChatService(IOptions<CopilotOptions> optionsAccessor, ILogger<CopilotChatService> logger)
         {
             _options = optionsAccessor?.Value ?? new CopilotOptions();
