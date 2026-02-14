@@ -1,0 +1,45 @@
+@namespace XafGitHubCopilot.Blazor.Server.Editors.CopilotChatViewItem
+
+@using DevExpress.AIIntegration.Blazor.Chat
+@using DevExpress.Blazor
+
+<div class="copilot-chat-container">
+    <DxAIChat CssClass="copilot-chat"
+              UseStreaming="false"
+              SizeMode="SizeMode.Medium">
+        <EmptyMessageAreaTemplate>
+            <div class="copilot-empty-area">
+                <h4>Copilot Assistant</h4>
+                <p>Ask me anything about your data. I'm powered by GitHub Copilot.</p>
+            </div>
+        </EmptyMessageAreaTemplate>
+    </DxAIChat>
+</div>
+
+<style>
+    .copilot-chat-container {
+        width: 100%;
+        height: calc(100vh - 45px);
+        display: flex;
+        flex-direction: column;
+    }
+
+    .copilot-empty-area {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: #666;
+    }
+
+    .copilot-empty-area h4 {
+        margin-bottom: 8px;
+    }
+
+    .copilot-chat {
+        flex: 1;
+        height: 100%;
+        min-height: 0;
+    }
+</style>

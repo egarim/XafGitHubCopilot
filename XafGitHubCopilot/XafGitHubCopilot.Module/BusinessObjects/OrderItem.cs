@@ -1,0 +1,30 @@
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations.Schema;
+using DevExpress.Persistent.Base;
+using DevExpress.Persistent.BaseImpl.EF;
+
+namespace XafGitHubCopilot.Module.BusinessObjects
+{
+    [DefaultClassOptions]
+    [DefaultProperty(nameof(Quantity))]
+    public class OrderItem : BaseObject
+    {
+        [Column(TypeName = "decimal(18,2)")]
+        public virtual decimal UnitPrice { get; set; }
+
+        public virtual int Quantity { get; set; }
+
+        [Column(TypeName = "decimal(5,2)")]
+        public virtual decimal Discount { get; set; }
+
+        public virtual Guid? OrderId { get; set; }
+
+        [ForeignKey(nameof(OrderId))]
+        public virtual Order Order { get; set; }
+
+        public virtual Guid? ProductId { get; set; }
+
+        [ForeignKey(nameof(ProductId))]
+        public virtual Product Product { get; set; }
+    }
+}
