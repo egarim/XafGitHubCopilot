@@ -45,6 +45,8 @@ XafGitHubCopilot.Win/             WinForms UI
 
 4. **Chat Flow** — User messages flow through `DxAIChat` (Blazor) or `AIChatControl` (WinForms) → `CopilotChatClient` (IChatClient adapter) → `CopilotChatService` → GitHub Copilot SDK session → AI model. Tool calls are executed automatically by the SDK, with results fed back into the conversation.
 
+For a detailed step-by-step walkthrough of how a user question becomes a data-driven answer — including what the AI model sees, how it decides which tool to call, and how the query executes against the database — see **[Behind the Scenes](BEHIND_THE_SCENES.md)**.
+
 ## Data Model
 
 A Northwind-style order management domain with 13 business entities:
