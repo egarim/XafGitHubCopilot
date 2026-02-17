@@ -10,7 +10,7 @@
               UseStreaming="true"
               SizeMode="SizeMode.Medium"
               ResponseContentFormat="ResponseContentFormat.Markdown"
-              Initialized="OnChatInitialized">
+              >
         <PromptSuggestions>
             @foreach (var s in CopilotChatDefaults.PromptSuggestions)
             {
@@ -36,14 +36,6 @@
 @code {
     MarkupString ToHtml(string markdown)
         => new(CopilotChatDefaults.ConvertMarkdownToHtml(markdown));
-
-    void OnChatInitialized(IAIChat chat)
-    {
-        chat.LoadMessages(new[]
-        {
-            new BlazorChatMessage(ChatRole.System, CopilotChatDefaults.SystemPrompt)
-        });
-    }
 }
 
 <style>

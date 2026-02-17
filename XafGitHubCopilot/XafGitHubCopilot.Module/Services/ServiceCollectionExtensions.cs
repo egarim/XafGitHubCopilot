@@ -14,6 +14,7 @@ namespace XafGitHubCopilot.Module.Services
 
             services.Configure<CopilotOptions>(configuration.GetSection(CopilotOptions.SectionName));
             services.AddSingleton<CopilotChatService>();
+            services.AddSingleton<SchemaDiscoveryService>();
 
             // Register the tools provider (singleton — tools are created lazily on first access).
             services.AddSingleton<CopilotToolsProvider>();
@@ -24,10 +25,11 @@ namespace XafGitHubCopilot.Module.Services
             {
                 var service = sp.GetRequiredService<CopilotChatService>();
                 var toolsProvider = sp.GetRequiredService<CopilotToolsProvider>();
+                var schemaService = sp.GetRequiredService<SchemaDiscoveryService>();
 
                 // Wire tools and system message into the service.
                 service.Tools = toolsProvider.Tools;
-                service.SystemMessage = CopilotChatDefaults.SystemPrompt;
+                service.SystemMessage = schemaService.GenerateSystemPrompt();
 
                 return new CopilotChatClient(service);
             });

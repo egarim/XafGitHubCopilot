@@ -45,8 +45,7 @@ namespace XafGitHubCopilot.Win
             var loggerFactory = LoggerFactory.Create(lb => { });
             var copilotService = new CopilotChatService(copilotOptions, loggerFactory.CreateLogger<CopilotChatService>());
 
-            // Set the system message — tools will be wired after Build() when IServiceProvider is available.
-            copilotService.SystemMessage = CopilotChatDefaults.SystemPrompt;
+            // System message is set after Build() when SchemaDiscoveryService is available.
 
             var copilotChatClient = new CopilotChatClient(copilotService);
             AIExtensionsContainerDesktop.Default.RegisterChatClient(copilotChatClient);
@@ -119,7 +118,9 @@ namespace XafGitHubCopilot.Win
             // Wire Copilot tools now that the DI container + INonSecuredObjectSpaceFactory are available.
             try
             {
-                var toolsProvider = new CopilotToolsProvider(winApplication.ServiceProvider);
+                var schemaService = winApplication.ServiceProvider.GetRequiredService<SchemaDiscoveryService>();
+                copilotService.SystemMessage = schemaService.GenerateSystemPrompt();
+                var toolsProvider = new CopilotToolsProvider(winApplication.ServiceProvider, schemaService);
                 copilotService.Tools = toolsProvider.Tools;
             }
             catch (Exception ex)

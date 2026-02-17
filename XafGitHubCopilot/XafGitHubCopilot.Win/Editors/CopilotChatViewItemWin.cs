@@ -49,18 +49,9 @@ namespace XafGitHubCopilot.Win.Editors
                     .Select(s => new PromptSuggestion(title: s.Title, text: s.Text, prompt: s.Prompt))
                     .ToList());
 
-            // System prompt with full domain context
-            _chatControl.Initialized += OnChatInitialized;
+            // System prompt is set on CopilotChatService via SchemaDiscoveryService (no UI-level injection needed).
 
             return _chatControl;
-        }
-
-        private void OnChatInitialized(object sender, EventArgs e)
-        {
-            _chatControl.LoadMessages(new[]
-            {
-                new BlazorChatMessage(ChatRole.System, CopilotChatDefaults.SystemPrompt)
-            });
         }
 
         private void OnMarkdownConvert(object sender, AIChatControlMarkdownConvertEventArgs e)
@@ -74,7 +65,6 @@ namespace XafGitHubCopilot.Win.Editors
             if (disposing && _chatControl != null)
             {
                 _chatControl.MarkdownConvert -= OnMarkdownConvert;
-                _chatControl.Initialized -= OnChatInitialized;
                 _chatControl.Dispose();
                 _chatControl = null;
             }

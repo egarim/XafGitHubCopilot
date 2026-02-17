@@ -1,31 +1,34 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Globalization;
 using System.Linq;
+using System.Text;
 using DevExpress.ExpressApp;
-using Microsoft.EntityFrameworkCore;
+using DevExpress.ExpressApp.DC;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using XafGitHubCopilot.Module.BusinessObjects;
 
 namespace XafGitHubCopilot.Module.Services
 {
     /// <summary>
-    /// Creates <see cref="AIFunction"/> tools following the exact pattern from the
-    /// GitHub Copilot SDK test suite: <c>[Description]</c> on the method,
-    /// <c>[Description]</c> on each parameter, and only <c>(method, name)</c>
-    /// passed to <see cref="AIFunctionFactory.Create"/>.
+    /// Creates generic <see cref="AIFunction"/> tools that work with any entity
+    /// discovered by <see cref="SchemaDiscoveryService"/>.
+    /// Pattern: <c>[Description]</c> on method + params, <c>AIFunctionFactory.Create(method, name)</c>.
     /// </summary>
     public sealed class CopilotToolsProvider
     {
         private readonly IServiceProvider _serviceProvider;
+        private readonly SchemaDiscoveryService _schemaService;
         private readonly ILogger<CopilotToolsProvider> _logger;
         private List<AIFunction> _tools;
 
-        public CopilotToolsProvider(IServiceProvider serviceProvider)
+        public CopilotToolsProvider(IServiceProvider serviceProvider, SchemaDiscoveryService schemaService)
         {
             _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
+            _schemaService = schemaService ?? throw new ArgumentNullException(nameof(schemaService));
             _logger = serviceProvider.GetRequiredService<ILogger<CopilotToolsProvider>>();
         }
 
@@ -33,26 +36,23 @@ namespace XafGitHubCopilot.Module.Services
 
         private List<AIFunction> CreateTools() =>
         [
-            AIFunctionFactory.Create(QueryOrders, "query_orders"),
-            AIFunctionFactory.Create(InvoiceAging, "invoice_aging"),
-            AIFunctionFactory.Create(LowStockProducts, "low_stock_products"),
-            AIFunctionFactory.Create(EmployeeOrderStats, "employee_order_stats"),
-            AIFunctionFactory.Create(EmployeeTerritories, "employee_territories"),
-            AIFunctionFactory.Create(CreateOrder, "create_order"),
+            AIFunctionFactory.Create(ListEntities, "list_entities"),
+            AIFunctionFactory.Create(QueryEntity, "query_entity"),
+            AIFunctionFactory.Create(CreateEntity, "create_entity"),
         ];
 
-        // ── Helpers ───────────────────────────────────────────────────────
+        // -- Helpers ---------------------------------------------------------------
 
         /// <summary>
-        /// Creates a DI scope + non-secured object space.
+        /// Creates a DI scope + non-secured object space for the given entity type.
         /// Callers MUST dispose the returned <see cref="ScopedObjectSpace"/>
         /// which disposes both the object space and the scope.
         /// </summary>
-        private ScopedObjectSpace GetObjectSpace<T>()
+        private ScopedObjectSpace GetObjectSpace(Type entityType)
         {
             var scope = _serviceProvider.CreateScope();
             var factory = scope.ServiceProvider.GetRequiredService<INonSecuredObjectSpaceFactory>();
-            var os = factory.CreateNonSecuredObjectSpace<T>();
+            var os = factory.CreateNonSecuredObjectSpace(entityType);
             return new ScopedObjectSpace(os, scope);
         }
 
@@ -75,228 +75,375 @@ namespace XafGitHubCopilot.Module.Services
             }
         }
 
-        // ── Tool implementations ──────────────────────────────────────────
-        // Pattern: [Description] on method + [Description] on params
-        // Return type: plain string (SDK wraps it automatically)
+        /// <summary>
+        /// Returns a comma-separated list of all known entity names.
+        /// </summary>
+        private string GetEntityNameList() =>
+            string.Join(", ", _schemaService.Schema.Entities.Select(e => e.Name));
 
-        [Description("Search orders by customer name and/or status. Returns up to 25 orders with line items.")]
-        private string QueryOrders(
-            [Description("Customer company name to search for (partial match). Omit for all customers.")] string customerName = "",
-            [Description("Order status filter: New, Processing, Shipped, Delivered, Cancelled. Omit for all.")] string status = "")
+        /// <summary>
+        /// Formats a single entity object as a line of "Property: Value" pairs
+        /// using XAF <see cref="ITypeInfo"/> metadata.
+        /// </summary>
+        private string FormatObject(object obj, EntityInfo entityInfo, ITypeInfo typeInfo)
         {
-            using var sos = GetObjectSpace<Order>();
-            var os = sos.Os;
-            var query = os.GetObjectsQuery<Order>()
-                .Include(o => o.Customer)
-                .Include(o => o.Employee)
-                .Include(o => o.Shipper)
-                .Include(o => o.OrderItems).ThenInclude(oi => oi.Product)
-                .AsSplitQuery()
-                .AsQueryable();
-
-            if (!string.IsNullOrWhiteSpace(customerName))
-                query = query.Where(o => o.Customer != null && o.Customer.CompanyName.Contains(customerName));
-            if (!string.IsNullOrWhiteSpace(status) && Enum.TryParse<OrderStatus>(status, true, out var st))
-                query = query.Where(o => o.Status == st);
-
-            var results = query.OrderByDescending(o => o.OrderDate).Take(25).ToList();
-            if (results.Count == 0) return "No orders found.";
-
-            var lines = results.Select(o =>
+            var parts = new List<string>();
+            foreach (var prop in entityInfo.Properties)
             {
-                var items = string.Join("; ", o.OrderItems.Select(i =>
-                    $"{i.Product?.Name ?? "?"} x{i.Quantity} @{i.UnitPrice:F2}"));
-                return $"[{o.OrderDate:yyyy-MM-dd}] {o.Status} | {o.Customer?.CompanyName ?? "?"} | " +
-                       $"Employee: {o.Employee?.FirstName} {o.Employee?.LastName} | " +
-                       $"Shipper: {o.Shipper?.CompanyName ?? "?"} | Freight: {o.Freight:F2} | " +
-                       $"Ship: {o.ShipCity}, {o.ShipCountry} | Items: {items}";
-            });
-            return $"Found {results.Count} order(s):\n" + string.Join("\n", lines);
+                var member = typeInfo.FindMember(prop.Name);
+                if (member == null) continue;
+                var val = member.GetValue(obj);
+                parts.Add($"{prop.Name}: {FormatValue(val)}");
+            }
+            // Include to-one relationship references (show a summary, not the whole object)
+            foreach (var rel in entityInfo.Relationships.Where(r => !r.IsCollection))
+            {
+                var member = typeInfo.FindMember(rel.PropertyName);
+                if (member == null) continue;
+                var refObj = member.GetValue(obj);
+                if (refObj != null)
+                    parts.Add($"{rel.PropertyName}: {GetObjectDisplayText(refObj)}");
+            }
+            return string.Join(" | ", parts);
         }
 
-        [Description("Get invoice aging summary grouped by customer. Shows overdue invoices by default.")]
-        private string InvoiceAging(
-            [Description("Invoice status: Draft, Sent, Paid, Overdue, Cancelled. Defaults to Overdue.")] string status = "Overdue")
+        /// <summary>
+        /// Attempts to produce a human-readable label for an entity object
+        /// by looking for common "name" properties.
+        /// </summary>
+        private static string GetObjectDisplayText(object obj)
         {
-            _logger.LogInformation("[Tool:invoice_aging] Called with status={Status}", status);
+            if (obj == null) return "null";
+            var type = obj.GetType();
+            // Try common name properties
+            foreach (var propName in new[] { "Name", "CompanyName", "Title", "FullName", "FirstName", "Description", "InvoiceNumber" })
+            {
+                var prop = type.GetProperty(propName);
+                if (prop != null)
+                {
+                    var val = prop.GetValue(obj);
+                    if (val != null) return val.ToString();
+                }
+            }
+            return obj.ToString();
+        }
+
+        private static string FormatValue(object val)
+        {
+            if (val == null) return "N/A";
+            if (val is DateTime dt) return dt.ToString("yyyy-MM-dd");
+            if (val is decimal d) return d.ToString("F2");
+            if (val is double dbl) return dbl.ToString("F2");
+            if (val is float f) return f.ToString("F2");
+            return val.ToString();
+        }
+
+        /// <summary>
+        /// Parses "Key=Value;Key2=Value2" into a list of key-value pairs.
+        /// </summary>
+        private static List<(string Key, string Value)> ParsePairs(string input)
+        {
+            var pairs = new List<(string, string)>();
+            if (string.IsNullOrWhiteSpace(input)) return pairs;
+            foreach (var segment in input.Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var eqIndex = segment.IndexOf('=');
+                if (eqIndex <= 0) continue;
+                var key = segment.Substring(0, eqIndex).Trim();
+                var value = segment.Substring(eqIndex + 1).Trim();
+                if (!string.IsNullOrEmpty(key))
+                    pairs.Add((key, value));
+            }
+            return pairs;
+        }
+
+        /// <summary>
+        /// Converts a string value to the target CLR type, handling enums, dates,
+        /// numbers, booleans, and nullable wrappers.
+        /// </summary>
+        private static object ConvertValue(string value, Type targetType)
+        {
+            if (value == null) return null;
+
+            var underlying = Nullable.GetUnderlyingType(targetType);
+            if (underlying != null)
+            {
+                if (string.IsNullOrWhiteSpace(value)) return null;
+                return ConvertValue(value, underlying);
+            }
+
+            if (targetType == typeof(string)) return value;
+            if (targetType.IsEnum) return Enum.Parse(targetType, value, ignoreCase: true);
+            if (targetType == typeof(DateTime)) return DateTime.Parse(value, CultureInfo.InvariantCulture);
+            if (targetType == typeof(int)) return int.Parse(value, CultureInfo.InvariantCulture);
+            if (targetType == typeof(long)) return long.Parse(value, CultureInfo.InvariantCulture);
+            if (targetType == typeof(decimal)) return decimal.Parse(value, CultureInfo.InvariantCulture);
+            if (targetType == typeof(double)) return double.Parse(value, CultureInfo.InvariantCulture);
+            if (targetType == typeof(float)) return float.Parse(value, CultureInfo.InvariantCulture);
+            if (targetType == typeof(bool)) return bool.Parse(value);
+            if (targetType == typeof(Guid)) return Guid.Parse(value);
+
+            return Convert.ChangeType(value, targetType, CultureInfo.InvariantCulture);
+        }
+
+        // -- Tool implementations --------------------------------------------------
+
+        [Description("List all available entities (tables) in the database with their properties and relationships.")]
+        private string ListEntities()
+        {
+            _logger.LogInformation("[Tool:list_entities] Called");
             try
             {
-                using var sos = GetObjectSpace<Invoice>();
-                var os = sos.Os;
-                if (!Enum.TryParse<InvoiceStatus>(status, true, out var invoiceStatus))
-                    invoiceStatus = InvoiceStatus.Overdue;
+                var schema = _schemaService.Schema;
+                var sb = new StringBuilder();
+                sb.AppendLine("Available entities:");
 
-                var invoices = os.GetObjectsQuery<Invoice>()
-                    .Include(inv => inv.Orders).ThenInclude(o => o.Customer)
-                    .Include(inv => inv.Orders).ThenInclude(o => o.OrderItems)
-                    .AsSplitQuery()
-                    .Where(inv => inv.Status == invoiceStatus)
-                    .ToList();
+                foreach (var entity in schema.Entities)
+                {
+                    var props = string.Join(", ", entity.Properties.Select(p => p.Name));
+                    sb.Append($"- {entity.Name} ({props})");
 
-                var grouped = invoices
-                    .SelectMany(inv => inv.Orders.Select(o => new { inv, o }))
-                    .Where(x => x.o.Customer != null)
-                    .GroupBy(x => x.o.Customer.CompanyName)
-                    .Select(g => new
+                    var rels = entity.Relationships;
+                    if (rels.Count > 0)
                     {
-                        Customer = g.Key,
-                        Count = g.Select(x => x.inv.InvoiceNumber).Distinct().Count(),
-                        Total = g.Sum(x => x.o.OrderItems.Sum(i => i.UnitPrice * i.Quantity * (1m - i.Discount / 100m))),
-                        OldestDue = g.Min(x => x.inv.DueDate),
-                        Invoices = g.Select(x => x.inv.InvoiceNumber).Distinct().ToList()
-                    })
-                    .OrderByDescending(x => x.Total)
-                    .ToList();
+                        var relDescriptions = rels.Select(r =>
+                            r.IsCollection ? $"has many {r.TargetEntity}" : $"belongs to {r.TargetEntity}");
+                        sb.Append($" -> {string.Join(", ", relDescriptions)}");
+                    }
+                    sb.AppendLine();
 
-                if (grouped.Count == 0) return $"No {invoiceStatus} invoices found.";
+                    // Enum values for properties
+                    foreach (var p in entity.Properties.Where(p => p.EnumValues.Count > 0))
+                        sb.AppendLine($"  - {p.Name} values: {string.Join(", ", p.EnumValues)}");
+                }
 
-                var lines = grouped.Select(g =>
-                    $"{g.Customer}: {g.Count} invoice(s), Total: {g.Total:F2}, " +
-                    $"Oldest Due: {g.OldestDue?.ToString("yyyy-MM-dd") ?? "N/A"}, " +
-                    $"Invoices: {string.Join(", ", g.Invoices)}");
-                var grandTotal = grouped.Sum(g => g.Total);
-                var result = $"Invoice Aging ({invoiceStatus}) — {grouped.Count} customer(s), Grand Total: {grandTotal:F2}\n" +
-                       string.Join("\n", lines);
-                _logger.LogInformation("[Tool:invoice_aging] Returning {Len} chars", result.Length);
+                var result = sb.ToString();
+                _logger.LogInformation("[Tool:list_entities] Returning {Len} chars", result.Length);
                 return result;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "[Tool:invoice_aging] Error");
-                return $"Error: {ex.Message}";
+                _logger.LogError(ex, "[Tool:list_entities] Error");
+                return $"Error listing entities: {ex.Message}";
             }
         }
 
-        [Description("Find non-discontinued products with stock below a given threshold. Includes supplier info.")]
-        private string LowStockProducts(
-            [Description("Stock threshold. Products below this level are returned. Default is 20.")] int threshold = 20)
+        [Description("Query records of any entity (table) in the database. Use list_entities first to see available entities and their properties.")]
+        private string QueryEntity(
+            [Description("Entity name to query (e.g. 'Customer', 'Order', 'Product'). Use list_entities to see available names.")] string entityName,
+            [Description("Optional filter as semicolon-separated 'PropertyName=value' pairs. Example: 'Status=New;Country=USA'. Omit for no filter.")] string filter = "",
+            [Description("Maximum number of records to return. Default is 25.")] int top = 25)
         {
-            using var sos = GetObjectSpace<Product>();
-            var os = sos.Os;
-            if (threshold <= 0) threshold = 20;
-
-            var products = os.GetObjectsQuery<Product>()
-                .Include(p => p.Supplier)
-                .Include(p => p.Category)
-                .Where(p => !p.Discontinued && p.UnitsInStock < threshold)
-                .OrderBy(p => p.UnitsInStock)
-                .ToList();
-
-            if (products.Count == 0) return $"No products with stock below {threshold}.";
-
-            var lines = products.Select(p =>
-                $"{p.Name} | Stock: {p.UnitsInStock} | Price: {p.UnitPrice:F2} | " +
-                $"Category: {p.Category?.Name ?? "N/A"} | " +
-                $"Supplier: {p.Supplier?.CompanyName ?? "N/A"} ({p.Supplier?.ContactName}, {p.Supplier?.Phone})");
-            return $"Low stock (below {threshold}): {products.Count} product(s)\n" + string.Join("\n", lines);
-        }
-
-        [Description("Get order count and total freight per employee, optionally filtered by date range.")]
-        private string EmployeeOrderStats(
-            [Description("Start date in yyyy-MM-dd format. Omit for all time.")] string fromDate = "",
-            [Description("End date in yyyy-MM-dd format. Omit for all time.")] string toDate = "")
-        {
-            using var sos = GetObjectSpace<Employee>();
-            var os = sos.Os;
-            var employees = os.GetObjectsQuery<Employee>().Include(e => e.Orders).ToList();
-
-            var stats = employees.Select(e =>
-            {
-                IEnumerable<Order> orders = e.Orders;
-                if (DateTime.TryParse(fromDate, out var from)) orders = orders.Where(o => o.OrderDate >= from);
-                if (DateTime.TryParse(toDate, out var to)) orders = orders.Where(o => o.OrderDate <= to);
-                var list = orders.ToList();
-                return new
-                {
-                    Name = $"{e.FirstName} {e.LastName}",
-                    e.Title,
-                    Count = list.Count,
-                    TotalFreight = list.Sum(o => o.Freight),
-                    AvgFreight = list.Count > 0 ? list.Average(o => o.Freight) : 0m,
-                    Last = list.Count > 0 ? list.Max(o => o.OrderDate).ToString("yyyy-MM-dd") : "N/A"
-                };
-            }).OrderByDescending(x => x.Count).ToList();
-
-            var lines = stats.Select(s =>
-                $"{s.Name} ({s.Title}): {s.Count} orders, Freight: {s.TotalFreight:F2} total / {s.AvgFreight:F2} avg, Last: {s.Last}");
-            return $"Employee Order Stats (from: {(string.IsNullOrEmpty(fromDate) ? "all" : fromDate)}, to: {(string.IsNullOrEmpty(toDate) ? "all" : toDate)})\n" +
-                   string.Join("\n", lines);
-        }
-
-        [Description("List all employees with their territory counts and territory/region details.")]
-        private string EmployeeTerritories()
-        {
-            using var sos = GetObjectSpace<Employee>();
-            var os = sos.Os;
-            var employees = os.GetObjectsQuery<Employee>()
-                .Include(e => e.Territories).ThenInclude(et => et.Territory).ThenInclude(t => t.Region)
-                .AsSplitQuery()
-                .ToList();
-
-            var lines = employees.OrderByDescending(e => e.Territories.Count).Select(e =>
-            {
-                var terrs = string.Join(", ", e.Territories.Select(et =>
-                    $"{et.Territory?.Name ?? "?"} ({et.Territory?.Region?.Name ?? "?"})"));
-                return $"{e.FirstName} {e.LastName}: {e.Territories.Count} — {terrs}";
-            });
-            return "Employee Territories:\n" + string.Join("\n", lines);
-        }
-
-        [Description("Create a new order for a customer with a product and shipper.")]
-        private string CreateOrder(
-            [Description("Customer company name (must match an existing customer).")] string customerName,
-            [Description("Product name (must match an existing product).")] string productName,
-            [Description("Quantity to order. Must be greater than 0.")] int quantity,
-            [Description("Shipper company name (must match an existing shipper).")] string shipperName)
-        {
-            using var sos = GetObjectSpace<Order>();
-            var os = sos.Os;
+            _logger.LogInformation("[Tool:query_entity] Called with entity={Entity}, filter={Filter}, top={Top}", entityName, filter, top);
             try
             {
-                var customer = os.GetObjectsQuery<Customer>().FirstOrDefault(c => c.CompanyName.Contains(customerName));
-                if (customer == null)
-                    return "Customer not found. Available: " + string.Join(", ",
-                        os.GetObjectsQuery<Customer>().Select(c => c.CompanyName).Take(10).ToList());
+                if (string.IsNullOrWhiteSpace(entityName))
+                    return $"Entity name is required. Available entities: {GetEntityNameList()}";
 
-                var product = os.GetObjectsQuery<Product>().FirstOrDefault(p => p.Name.Contains(productName));
-                if (product == null)
-                    return "Product not found. Available: " + string.Join(", ",
-                        os.GetObjectsQuery<Product>().Where(p => !p.Discontinued).Select(p => p.Name).Take(10).ToList());
+                var entityInfo = _schemaService.Schema.FindEntity(entityName);
+                if (entityInfo == null)
+                    return $"Entity '{entityName}' not found. Available entities: {GetEntityNameList()}";
 
-                var shipper = os.GetObjectsQuery<Shipper>().FirstOrDefault(s => s.CompanyName.Contains(shipperName));
-                if (shipper == null)
-                    return "Shipper not found. Available: " + string.Join(", ",
-                        os.GetObjectsQuery<Shipper>().Select(s => s.CompanyName).ToList());
+                var entityType = entityInfo.ClrType;
+                if (top <= 0) top = 25;
 
-                if (quantity <= 0) return "Quantity must be greater than 0.";
+                using var sos = GetObjectSpace(entityType);
+                var os = sos.Os;
+                var typeInfo = XafTypesInfo.Instance.FindTypeInfo(entityType);
 
-                var order = os.CreateObject<Order>();
-                order.Customer = os.GetObject(customer);
-                order.Shipper = os.GetObject(shipper);
-                order.OrderDate = DateTime.Now;
-                order.RequiredDate = DateTime.Now.AddDays(14);
-                order.Status = OrderStatus.New;
-                order.ShipAddress = customer.Address;
-                order.ShipCity = customer.City;
-                order.ShipCountry = customer.Country;
-                order.Freight = 0m;
+                // Retrieve all objects of this type
+                var allObjects = os.GetObjects(entityType);
+                IEnumerable<object> results = allObjects.Cast<object>();
 
-                var item = os.CreateObject<OrderItem>();
-                item.Order = order;
-                item.Product = os.GetObject(product);
-                item.Quantity = quantity;
-                item.UnitPrice = product.UnitPrice;
-                item.Discount = 0m;
-                order.OrderItems.Add(item);
-                os.CommitChanges();
+                // Apply in-memory filters
+                var filterPairs = ParsePairs(filter);
+                foreach (var (key, value) in filterPairs)
+                {
+                    // Try scalar property first
+                    var propInfo = entityInfo.Properties
+                        .FirstOrDefault(p => p.Name.Equals(key, StringComparison.OrdinalIgnoreCase));
+                    if (propInfo != null)
+                    {
+                        var member = typeInfo.FindMember(propInfo.Name);
+                        if (member != null)
+                        {
+                            // For string properties, use Contains (case-insensitive)
+                            if (propInfo.ClrType == typeof(string))
+                            {
+                                results = results.Where(o =>
+                                {
+                                    var v = member.GetValue(o) as string;
+                                    return v != null && v.IndexOf(value, StringComparison.OrdinalIgnoreCase) >= 0;
+                                });
+                            }
+                            else
+                            {
+                                try
+                                {
+                                    var converted = ConvertValue(value, propInfo.ClrType);
+                                    results = results.Where(o => Equals(member.GetValue(o), converted));
+                                }
+                                catch
+                                {
+                                    return $"Cannot convert filter value '{value}' to type '{propInfo.TypeName}' for property '{key}'.";
+                                }
+                            }
+                        }
+                        continue;
+                    }
 
-                return $"Order created! Date: {order.OrderDate:yyyy-MM-dd}, Customer: {customer.CompanyName}, " +
-                       $"Product: {product.Name} x{quantity} @{product.UnitPrice:F2} = {product.UnitPrice * quantity:F2}, " +
-                       $"Shipper: {shipper.CompanyName}, Status: New, Ship: {order.ShipCity}, {order.ShipCountry}";
+                    // Try relationship (to-one navigation) — match by display text
+                    var relInfo = entityInfo.Relationships
+                        .FirstOrDefault(r => !r.IsCollection && r.PropertyName.Equals(key, StringComparison.OrdinalIgnoreCase));
+                    if (relInfo != null)
+                    {
+                        var member = typeInfo.FindMember(relInfo.PropertyName);
+                        if (member != null)
+                        {
+                            results = results.Where(o =>
+                            {
+                                var refObj = member.GetValue(o);
+                                if (refObj == null) return false;
+                                var display = GetObjectDisplayText(refObj);
+                                return display.IndexOf(value, StringComparison.OrdinalIgnoreCase) >= 0;
+                            });
+                        }
+                        continue;
+                    }
+
+                    var availableProps = string.Join(", ", entityInfo.Properties.Select(p => p.Name)
+                        .Concat(entityInfo.Relationships.Where(r => !r.IsCollection).Select(r => r.PropertyName)));
+                    return $"Property '{key}' not found on {entityInfo.Name}. Available: {availableProps}";
+                }
+
+                var list = results.Take(top).ToList();
+                if (list.Count == 0) return $"No {entityInfo.Name} records found matching the given criteria.";
+
+                var sb = new StringBuilder();
+                sb.AppendLine($"Found {list.Count} {entityInfo.Name} record(s):");
+                foreach (var obj in list)
+                    sb.AppendLine(FormatObject(obj, entityInfo, typeInfo));
+
+                var result = sb.ToString();
+                _logger.LogInformation("[Tool:query_entity] Returning {Len} chars, {Count} records", result.Length, list.Count);
+                return result;
             }
             catch (Exception ex)
             {
-                return $"Error creating order: {ex.Message}";
+                _logger.LogError(ex, "[Tool:query_entity] Error");
+                return $"Error querying {entityName}: {ex.Message}";
+            }
+        }
+
+        [Description("Create a new record of any entity in the database. Use list_entities first to see available entities, their properties, and relationships.")]
+        private string CreateEntity(
+            [Description("Entity name to create (e.g. 'Customer', 'Order', 'Product'). Use list_entities to see available names.")] string entityName,
+            [Description("Semicolon-separated 'PropertyName=value' pairs. For reference properties (relationships), provide a search term to match by name. Example: 'CompanyName=Acme Corp;Country=USA' or 'Customer=Acme;Status=New'.")] string properties)
+        {
+            _logger.LogInformation("[Tool:create_entity] Called with entity={Entity}, properties={Props}", entityName, properties);
+            try
+            {
+                if (string.IsNullOrWhiteSpace(entityName))
+                    return $"Entity name is required. Available entities: {GetEntityNameList()}";
+
+                var entityInfo = _schemaService.Schema.FindEntity(entityName);
+                if (entityInfo == null)
+                    return $"Entity '{entityName}' not found. Available entities: {GetEntityNameList()}";
+
+                if (string.IsNullOrWhiteSpace(properties))
+                {
+                    var availableProps = string.Join(", ", entityInfo.Properties.Select(p => p.Name));
+                    var availableRels = string.Join(", ", entityInfo.Relationships.Where(r => !r.IsCollection).Select(r => r.PropertyName));
+                    return $"Properties are required. {entityInfo.Name} properties: {availableProps}" +
+                           (string.IsNullOrEmpty(availableRels) ? "" : $". Relationships: {availableRels}");
+                }
+
+                var entityType = entityInfo.ClrType;
+                using var sos = GetObjectSpace(entityType);
+                var os = sos.Os;
+                var typeInfo = XafTypesInfo.Instance.FindTypeInfo(entityType);
+
+                var obj = os.CreateObject(entityType);
+                var pairs = ParsePairs(properties);
+                var setProperties = new List<string>();
+
+                foreach (var (key, value) in pairs)
+                {
+                    // Check if it's a scalar property
+                    var propInfo = entityInfo.Properties
+                        .FirstOrDefault(p => p.Name.Equals(key, StringComparison.OrdinalIgnoreCase));
+                    if (propInfo != null)
+                    {
+                        var member = typeInfo.FindMember(propInfo.Name);
+                        if (member != null)
+                        {
+                            try
+                            {
+                                var converted = ConvertValue(value, propInfo.ClrType);
+                                member.SetValue(obj, converted);
+                                setProperties.Add($"{propInfo.Name}: {FormatValue(converted)}");
+                            }
+                            catch (Exception ex)
+                            {
+                                return $"Error setting {propInfo.Name}: cannot convert '{value}' to {propInfo.TypeName}. {ex.Message}";
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Check if it's a to-one relationship
+                    var relInfo = entityInfo.Relationships
+                        .FirstOrDefault(r => !r.IsCollection && r.PropertyName.Equals(key, StringComparison.OrdinalIgnoreCase));
+                    if (relInfo != null)
+                    {
+                        // Look up the referenced entity by searching for a natural key match
+                        var refObjects = os.GetObjects(relInfo.TargetClrType);
+                        object matched = null;
+                        foreach (var refObj in refObjects)
+                        {
+                            var display = GetObjectDisplayText(refObj);
+                            if (display.IndexOf(value, StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                matched = refObj;
+                                break;
+                            }
+                        }
+
+                        if (matched == null)
+                        {
+                            // List some available values to help the user
+                            var available = refObjects.Cast<object>()
+                                .Take(10)
+                                .Select(GetObjectDisplayText);
+                            return $"{relInfo.PropertyName} '{value}' not found. Available {relInfo.TargetEntity} records: {string.Join(", ", available)}";
+                        }
+
+                        var member = typeInfo.FindMember(relInfo.PropertyName);
+                        if (member != null)
+                        {
+                            member.SetValue(obj, matched);
+                            setProperties.Add($"{relInfo.PropertyName}: {GetObjectDisplayText(matched)}");
+                        }
+                        continue;
+                    }
+
+                    // Property not found
+                    var allProps = string.Join(", ", entityInfo.Properties.Select(p => p.Name)
+                        .Concat(entityInfo.Relationships.Where(r => !r.IsCollection).Select(r => r.PropertyName)));
+                    return $"Property '{key}' not found on {entityInfo.Name}. Available: {allProps}";
+                }
+
+                os.CommitChanges();
+
+                var summary = string.Join(" | ", setProperties);
+                var result = $"{entityInfo.Name} created successfully! {summary}";
+                _logger.LogInformation("[Tool:create_entity] {Result}", result);
+                return result;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[Tool:create_entity] Error");
+                return $"Error creating {entityName}: {ex.Message}";
             }
         }
     }
