@@ -47,6 +47,8 @@ XafGitHubCopilot.Win/             WinForms UI
 
 For a detailed step-by-step walkthrough of how a user question becomes a data-driven answer — including what the AI model sees, how it decides which tool to call, and how the query executes against the database — see **[Behind the Scenes](BEHIND_THE_SCENES.md)**.
 
+For an overview of the DevExpress AI-powered reporting extensions available in v25.2 (Prompt-to-Report, AI expressions, report localization, summarize & translate, and more) and how to enable them in this project — see **[More AI: AI-Powered Reporting](MORE_AI.md)**.
+
 ## Data Model
 
 A Northwind-style order management domain with 13 business entities:
