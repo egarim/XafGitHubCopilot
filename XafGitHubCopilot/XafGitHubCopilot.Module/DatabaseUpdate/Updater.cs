@@ -119,7 +119,8 @@ namespace XafGitHubCopilot.Module.DatabaseUpdate
 
             var regions = CreateRegions();
             var territories = CreateTerritories(regions);
-            var employees = CreateEmployees(territories);
+            var departments = CreateDepartments();
+            var employees = CreateEmployees(territories, departments);
             var categories = CreateCategories();
             var suppliers = CreateSuppliers();
             var products = CreateProducts(categories, suppliers, random);
@@ -165,7 +166,32 @@ namespace XafGitHubCopilot.Module.DatabaseUpdate
             return territories;
         }
 
-        IList<Employee> CreateEmployees(IList<Territory> territories)
+        IList<Department> CreateDepartments()
+        {
+            var data = new (string Name, string Code, string Location, decimal Budget, bool IsActive)[]
+            {
+                ("Sales", "SALES", "Building A, Floor 2", 500000m, true),
+                ("Engineering", "ENG", "Building B, Floor 1", 1200000m, true),
+                ("Human Resources", "HR", "Building A, Floor 1", 300000m, true),
+                ("Marketing", "MKT", "Building C, Floor 3", 450000m, true),
+                ("Finance", "FIN", "Building A, Floor 3", 350000m, true)
+            };
+
+            var departments = new List<Department>();
+            foreach (var item in data)
+            {
+                var department = ObjectSpace.CreateObject<Department>();
+                department.Name = item.Name;
+                department.Code = item.Code;
+                department.Location = item.Location;
+                department.Budget = item.Budget;
+                department.IsActive = item.IsActive;
+                departments.Add(department);
+            }
+            return departments;
+        }
+
+        IList<Employee> CreateEmployees(IList<Territory> territories, IList<Department> departments)
         {
             var employees = new List<Employee>();
             var data = new[]
@@ -194,6 +220,13 @@ namespace XafGitHubCopilot.Module.DatabaseUpdate
             employees[2].ReportsTo = employees[0];
             employees[3].ReportsTo = employees[1];
             employees[4].ReportsTo = employees[2];
+
+            // Assign departments
+            employees[0].Department = departments[0]; // Nancy -> Sales
+            employees[1].Department = departments[0]; // Andrew -> Sales
+            employees[2].Department = departments[1]; // Janet -> Engineering
+            employees[3].Department = departments[1]; // Margaret -> Engineering
+            employees[4].Department = departments[3]; // Steven -> Marketing
 
             // Territory assignments
             var assignments = new Dictionary<int, int[]>

@@ -34,6 +34,7 @@ namespace XafGitHubCopilot.Module.BusinessObjects
         public DbSet<Shipper> Shippers { get; set; }
         public DbSet<Supplier> Suppliers { get; set; }
         public DbSet<Territory> Territories { get; set; }
+        public DbSet<Department> Departments { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -131,6 +132,12 @@ namespace XafGitHubCopilot.Module.BusinessObjects
             modelBuilder.Entity<Invoice>()
                 .HasIndex(i => i.InvoiceNumber)
                 .IsUnique();
+
+            modelBuilder.Entity<Department>()
+                .HasMany(d => d.Employees)
+                .WithOne(e => e.Department)
+                .HasForeignKey(e => e.DepartmentId)
+                .OnDelete(DeleteBehavior.SetNull);
         }
     }
 }

@@ -41,6 +41,11 @@ namespace XafGitHubCopilot.Module.BusinessObjects
 
         public virtual IList<Order> Orders { get; set; } = new ObservableCollection<Order>();
 
+        public virtual Guid? DepartmentId { get; set; }
+
+        [ForeignKey(nameof(DepartmentId))]
+        public virtual Department Department { get; set; }
+
         public string FullName => string.Join(" ", new[] { FirstName, LastName }.Where(x => !string.IsNullOrWhiteSpace(x)));
     }
 }
